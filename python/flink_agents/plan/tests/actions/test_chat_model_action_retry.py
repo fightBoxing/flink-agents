@@ -20,7 +20,7 @@
 import asyncio
 import time
 from typing import Any, Sequence
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -95,10 +95,23 @@ class _MockMemoryObject:
         self._store[path] = value
 
 
+class _Immediate:
+    """Awaitable that returns a value without yielding."""
+
+    def __init__(self, value: Any) -> None:
+        self._value = value
+
+    def __await__(self) -> Any:
+        if False:
+            yield None
+        return self._value
+
+
 def _create_mock_runner_context(
     chat_model: Any,
     max_retries: int = 3,
     retry_wait_interval_sec: int = 1,
+    chat_async: bool = False,
 ) -> tuple[MagicMock, list, _MockMetricGroup, _MockMemoryObject]:
     """Create a mock RunnerContext with configurable retry settings.
 
@@ -113,7 +126,7 @@ def _create_mock_runner_context(
         id(AgentExecutionOptions.ERROR_HANDLING_STRATEGY): ErrorHandlingStrategy.RETRY,
         id(AgentExecutionOptions.MAX_RETRIES): max_retries,
         id(AgentExecutionOptions.RETRY_WAIT_INTERVAL): retry_wait_interval_sec,
-        id(AgentExecutionOptions.CHAT_ASYNC): False,
+        id(AgentExecutionOptions.CHAT_ASYNC): chat_async,
     }
     config.get = MagicMock(
         side_effect=lambda option: option_values.get(
@@ -210,11 +223,54 @@ class TestChatModelActionRetry:
         # 1s config. Exponential: 1s (2^0) = 1s total
         assert event.total_retry_wait_sec == 1
         assert elapsed >= 1.0
+        ctx.suspend.assert_not_called()
 
         # Verify metrics recorded under connection name
         model_group = metric_group.get_sub_group(chat_model.connection)
         assert model_group.get_counter("retryCount").get_count() == 1
         assert model_group.get_counter("retryWaitSec").get_count() == 1
+
+    def test_chat_async_retry_wait_suspends_without_blocking(self) -> None:
+        """Async retry wait must suspend instead of sleeping on the caller."""
+        call_count = 0
+
+        def mock_chat(messages: Sequence[ChatMessage], **kwargs: Any) -> ChatMessage:
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 2:
+                err_msg = "transient error"
+                raise RuntimeError(err_msg)
+            return ChatMessage(role=MessageRole.ASSISTANT, content="success")
+
+        chat_model = MagicMock()
+        chat_model.chat = mock_chat
+
+        ctx, sent_events, _, _ = _create_mock_runner_context(
+            chat_model, max_retries=3, retry_wait_interval_sec=1, chat_async=True
+        )
+        ctx.durable_execute_async = MagicMock(
+            side_effect=lambda fn, *args, **kwargs: _Immediate(fn(*args, **kwargs))
+        )
+        ctx.suspend = AsyncMock()
+
+        start = time.monotonic()
+        asyncio.run(
+            chat(
+                uuid4(),
+                "test-model",
+                [ChatMessage(role=MessageRole.USER, content="hi")],
+                None,
+                ctx,
+            )
+        )
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 0.5
+        ctx.suspend.assert_any_await(1)
+        ctx.suspend.assert_any_await(2)
+        event = sent_events[0]
+        assert event.retry_count == 2
+        assert event.total_retry_wait_sec == 3
 
     def test_chat_exhausts_retries_and_raises(self) -> None:
         """All retries exhausted: exception raised, no event sent."""

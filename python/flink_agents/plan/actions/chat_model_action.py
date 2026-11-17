@@ -292,7 +292,11 @@ async def chat(
                     f"waiting {current_wait_sec} s."
                 )
                 if current_wait_sec > 0:
-                    time.sleep(current_wait_sec)
+                    if chat_async:
+                        # Yield back to the mailbox instead of sleeping on it.
+                        await ctx.suspend(current_wait_sec)
+                    else:
+                        time.sleep(current_wait_sec)
                     total_wait_time_sec += current_wait_sec
             else:
                 _logger.debug(

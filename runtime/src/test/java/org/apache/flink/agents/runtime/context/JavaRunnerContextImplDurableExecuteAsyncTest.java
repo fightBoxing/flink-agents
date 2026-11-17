@@ -195,6 +195,19 @@ class JavaRunnerContextImplDurableExecuteAsyncTest {
         assertEquals(1, context.getDurableExecutionContext().getCurrentCallIndex());
     }
 
+    @Test
+    void testSuspendDelegatesToExecutorWithoutBlocking() throws Exception {
+        InspectingContinuationActionExecutor executor = new InspectingContinuationActionExecutor();
+        JavaRunnerContextImpl context = createContext(new ActionState(null), executor);
+
+        long startNanos = System.nanoTime();
+        context.suspend(5_000L);
+        long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L;
+
+        assertEquals(5_000L, executor.getSuspendedMillis());
+        assertTrue(elapsedMs < 500L, "suspend blocked the caller for " + elapsedMs + " ms");
+    }
+
     private JavaRunnerContextImpl createContext(
             ActionState actionState, ContinuationActionExecutor executor) {
         JavaRunnerContextImpl context =
@@ -226,9 +239,19 @@ class JavaRunnerContextImplDurableExecuteAsyncTest {
             extends ContinuationActionExecutor {
         private Runnable beforeExecute;
         private int executeAsyncCallCount;
+        private long suspendedMillis = -1L;
 
         private InspectingContinuationActionExecutor() {
             super(1);
+        }
+
+        @Override
+        public void suspend(ContinuationContext context, long durationMillis) {
+            suspendedMillis = durationMillis;
+        }
+
+        private long getSuspendedMillis() {
+            return suspendedMillis;
         }
 
         @Override

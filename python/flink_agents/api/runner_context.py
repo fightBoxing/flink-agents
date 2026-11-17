@@ -15,6 +15,7 @@
 #  See the License for the specific language governing permissions and
 # limitations under the License.
 #################################################################################
+import time
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Callable, Dict
 
@@ -73,6 +74,13 @@ class AsyncExecutionResult:
         while not future.done():
             yield
         return future.result()
+
+
+class _MailboxYield:
+    """Awaitable that yields once and returns control to the mailbox driver."""
+
+    def __await__(self) -> Any:
+        yield None
 
 
 class RunnerContext(ABC):
@@ -320,6 +328,24 @@ class RunnerContext(ABC):
         ReadableConfiguration
             The configuration for flink agents.
         """
+
+    async def suspend(self, duration_sec: float) -> None:
+        """Suspend the current action without blocking the operator mailbox.
+
+        Each wait step yields so the mailbox can run other mail. A driver that
+        resumes the coroutine observes the deadline. Non-positive durations
+        return immediately.
+
+        Parameters
+        ----------
+        duration_sec : float
+            How long to wait, in seconds.
+        """
+        if duration_sec <= 0:
+            return
+        deadline = time.monotonic() + duration_sec
+        while time.monotonic() < deadline:
+            await _MailboxYield()
 
     @abstractmethod
     def close(self) -> None:
