@@ -301,6 +301,9 @@ public class ChatModelAction {
                     response = generateStructuredOutput(response, outputSchema);
                 }
                 break;
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw interrupted;
             } catch (Exception e) {
                 if (strategy == Agent.ErrorHandlingStrategy.IGNORE) {
                     LOG.warn(
@@ -320,7 +323,14 @@ public class ChatModelAction {
                             numRetries,
                             currentWaitSec);
                     if (currentWaitSec > 0) {
-                        Thread.sleep(currentWaitSec * 1000L);
+                        long waitMillis = currentWaitSec * 1000L;
+                        if (chatAsync) {
+                            // Yield the mailbox thread. Sync chat keeps the caller blocked,
+                            // matching the rest of that execution mode.
+                            ctx.suspend(waitMillis);
+                        } else {
+                            Thread.sleep(waitMillis);
+                        }
                         totalWaitTimeSec += currentWaitSec;
                     }
                 } else {

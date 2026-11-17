@@ -59,6 +59,19 @@ public class JavaRunnerContextImpl extends RunnerContextImpl {
     }
 
     @Override
+    public void suspend(long durationMillis) throws Exception {
+        if (durationMillis <= 0) {
+            return;
+        }
+        mailboxThreadChecker.run();
+        if (continuationExecutor != null && continuationContext != null) {
+            continuationExecutor.suspend(continuationContext, durationMillis);
+            return;
+        }
+        Thread.sleep(durationMillis);
+    }
+
+    @Override
     public <T> T durableExecuteAsync(DurableCallable<T> callable) throws Exception {
         if (durableExecutionContext != null) {
             Callable<T> reconcileCallable = callable.reconciler();

@@ -20,9 +20,12 @@ package org.apache.flink.agents.runtime.async;
 import jdk.internal.vm.Continuation;
 import jdk.internal.vm.ContinuationScope;
 
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -39,11 +42,18 @@ public class ContinuationActionExecutor {
     private static final ContinuationScope SCOPE = new ContinuationScope("FlinkAgentsAction");
 
     private final ExecutorService asyncExecutor;
+    private final ScheduledExecutorService delayScheduler;
 
     public ContinuationActionExecutor(int numAsyncThreads) {
         LOG.info("Initialize fixed thread pool for async task with {} threads", numAsyncThreads);
-        this.asyncExecutor =
-                Executors.newFixedThreadPool(numAsyncThreads);
+        this.asyncExecutor = Executors.newFixedThreadPool(numAsyncThreads);
+        this.delayScheduler =
+                Executors.newSingleThreadScheduledExecutor(
+                        runnable -> {
+                            Thread thread = new Thread(runnable, "flink-agents-action-delay");
+                            thread.setDaemon(true);
+                            return thread;
+                        });
     }
 
     /**
@@ -148,8 +158,36 @@ public class ContinuationActionExecutor {
         return (T) context.getAsyncResultRef().get();
     }
 
+    /**
+     * Schedules a delay and yields the current continuation so the mailbox thread can run other
+     * mail. The next {@link #executeAction} resumes this continuation after the delay.
+     */
+    public void suspend(ContinuationContext context, long durationMillis) throws Exception {
+        if (durationMillis <= 0) {
+            return;
+        }
+        Future<?> future =
+                delayScheduler.schedule(() -> null, durationMillis, TimeUnit.MILLISECONDS);
+        context.setPendingFuture(future);
+        try {
+            while (!future.isDone()) {
+                Continuation.yield(SCOPE);
+            }
+            try {
+                future.get();
+            } catch (CancellationException cancelled) {
+                throw new InterruptedException("Action delay was cancelled");
+            }
+        } finally {
+            if (context.getPendingFuture() == future) {
+                context.setPendingFuture(null);
+            }
+        }
+    }
+
     public void close() {
         asyncExecutor.shutdownNow();
+        delayScheduler.shutdownNow();
     }
 
     /**

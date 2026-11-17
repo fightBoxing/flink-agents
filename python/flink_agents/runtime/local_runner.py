@@ -17,6 +17,7 @@
 #################################################################################
 import asyncio
 import logging
+import time
 import uuid
 from collections import deque
 from concurrent.futures import Future
@@ -247,6 +248,12 @@ class LocalRunnerContext(RunnerContext):
     @override
     def config(self) -> AgentConfiguration:
         return self._config
+
+    @override
+    async def suspend(self, duration_sec: float) -> None:
+        """Local execution has no mailbox, so wait on this thread."""
+        if duration_sec > 0:
+            time.sleep(duration_sec)
 
     def clear_sensory_memory(self) -> None:
         """Clean up sensory memory."""

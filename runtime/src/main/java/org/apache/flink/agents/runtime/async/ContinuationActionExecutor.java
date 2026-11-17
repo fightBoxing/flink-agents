@@ -56,6 +56,16 @@ public class ContinuationActionExecutor {
         return supplier.get();
     }
 
+    /**
+     * Waits for {@code durationMillis}. JDK 11 has no continuation yield, so this blocks the caller.
+     * JDK 21 schedules the wait and yields the mailbox thread.
+     */
+    public void suspend(ContinuationContext context, long durationMillis) throws Exception {
+        if (durationMillis > 0) {
+            Thread.sleep(durationMillis);
+        }
+    }
+
     public void close() {}
 
     /**

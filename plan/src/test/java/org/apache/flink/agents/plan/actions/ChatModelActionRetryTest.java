@@ -161,6 +161,41 @@ class ChatModelActionRetryTest {
         verify(mockActionMetricGroup).getSubGroup(mockChatModel.getConnectionName());
         verify(mockRetryCountCounter).inc(1);
         verify(mockRetryWaitSecCounter).inc(1);
+        verify(mockCtx, never()).suspend(anyLong());
+    }
+
+    @Test
+    void chatAsyncRetryWaitSuspendsWithoutBlockingCaller() throws Exception {
+        configureRetryStrategy(3, 1, true);
+        when(mockCtx.<ChatMessage>durableExecuteAsync(any()))
+                .thenAnswer(inv -> inv.<DurableCallable<ChatMessage>>getArgument(0).call());
+
+        AtomicInteger callCount = new AtomicInteger(0);
+        when(mockChatModel.chat(any(), any()))
+                .thenAnswer(
+                        inv -> {
+                            int count = callCount.incrementAndGet();
+                            if (count <= 2) {
+                                throw new RuntimeException("transient error");
+                            }
+                            return new ChatMessage(MessageRole.ASSISTANT, "success");
+                        });
+
+        long startTime = System.currentTimeMillis();
+        ChatModelAction.chat(
+                UUID.randomUUID(),
+                "test-model",
+                List.of(new ChatMessage(MessageRole.USER, "hi")),
+                null,
+                mockCtx);
+        long elapsed = System.currentTimeMillis() - startTime;
+
+        assertThat(elapsed).isLessThan(500L);
+        verify(mockCtx).suspend(1000L);
+        verify(mockCtx).suspend(2000L);
+        ChatResponseEvent responseEvent = (ChatResponseEvent) sentEvents.get(0);
+        assertThat(responseEvent.getRetryCount()).isEqualTo(2);
+        assertThat(responseEvent.getTotalRetryWaitSec()).isEqualTo(3);
     }
 
     @Test
@@ -214,6 +249,11 @@ class ChatModelActionRetryTest {
     // --- Helper methods ---
 
     private void configureRetryStrategy(int maxRetries, int waitIntervalSec) {
+        configureRetryStrategy(maxRetries, waitIntervalSec, false);
+    }
+
+    private void configureRetryStrategy(
+            int maxRetries, int waitIntervalSec, boolean chatAsync) {
         when(mockCtx.getConfig())
                 .thenAnswer(
                         inv -> {
@@ -235,7 +275,7 @@ class ChatModelActionRetryTest {
                                         return (T) Integer.valueOf(waitIntervalSec);
                                     }
                                     if (option == AgentExecutionOptions.CHAT_ASYNC) {
-                                        return (T) Boolean.FALSE;
+                                        return (T) Boolean.valueOf(chatAsync);
                                     }
                                     return option.getDefaultValue();
                                 }
