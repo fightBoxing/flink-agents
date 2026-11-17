@@ -324,12 +324,17 @@ public class ChatModelAction {
                             currentWaitSec);
                     if (currentWaitSec > 0) {
                         long waitMillis = currentWaitSec * 1000L;
-                        if (chatAsync) {
-                            // Yield the mailbox thread. Sync chat keeps the caller blocked,
-                            // matching the rest of that execution mode.
-                            ctx.suspend(waitMillis);
-                        } else {
-                            Thread.sleep(waitMillis);
+                        try {
+                            if (chatAsync) {
+                                // Yield the mailbox thread. Sync chat keeps the caller blocked,
+                                // matching the rest of that execution mode.
+                                ctx.suspend(waitMillis);
+                            } else {
+                                Thread.sleep(waitMillis);
+                            }
+                        } catch (InterruptedException interrupted) {
+                            Thread.currentThread().interrupt();
+                            throw interrupted;
                         }
                         totalWaitTimeSec += currentWaitSec;
                     }

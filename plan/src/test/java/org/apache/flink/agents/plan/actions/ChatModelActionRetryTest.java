@@ -199,6 +199,32 @@ class ChatModelActionRetryTest {
     }
 
     @Test
+    void chatAsyncRetryWaitRestoresInterruptAndStopsRetrying() throws Exception {
+        configureRetryStrategy(3, 1, true);
+        when(mockCtx.<ChatMessage>durableExecuteAsync(any()))
+                .thenAnswer(inv -> inv.<DurableCallable<ChatMessage>>getArgument(0).call());
+        when(mockChatModel.chat(any(), any())).thenThrow(new RuntimeException("transient error"));
+        doThrow(new InterruptedException("stopped")).when(mockCtx).suspend(anyLong());
+
+        try {
+            assertThatThrownBy(
+                            () ->
+                                    ChatModelAction.chat(
+                                            UUID.randomUUID(),
+                                            "test-model",
+                                            List.of(new ChatMessage(MessageRole.USER, "hi")),
+                                            null,
+                                            mockCtx))
+                    .isInstanceOf(InterruptedException.class);
+            assertThat(Thread.currentThread().isInterrupted()).isTrue();
+            verify(mockChatModel, times(1)).chat(any(), any());
+            assertThat(sentEvents).isEmpty();
+        } finally {
+            Thread.interrupted();
+        }
+    }
+
+    @Test
     void chatExhaustsRetriesAndThrows() {
         configureRetryStrategy(2, 0);
 

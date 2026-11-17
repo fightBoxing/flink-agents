@@ -176,6 +176,7 @@ public class ContinuationActionExecutor {
             try {
                 future.get();
             } catch (CancellationException cancelled) {
+                Thread.currentThread().interrupt();
                 throw new InterruptedException("Action delay was cancelled");
             }
         } finally {

@@ -20,52 +20,91 @@ package org.apache.flink.agents.runtime.async;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.lang.reflect.InvocationTargetException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
-/**
- * Verifies retry backoff yields the mailbox thread on JDK 21. The JDK 11 executor cannot yield, so
- * the test is skipped unless the multi-release continuation implementation is on the classpath.
- */
+/** Loads the JDK 21 continuation executor and checks retry backoff yields the mailbox thread. */
 class ContinuationSuspendTest {
 
     @Test
     void suspendYieldsBeforeDelayElapses() throws Exception {
-        Assumptions.assumeTrue(ContinuationActionExecutor.isContinuationSupported());
+        if (ContinuationActionExecutor.isContinuationSupported()) {
+            ContinuationSuspendDriver.run();
+            return;
+        }
 
-        ContinuationActionExecutor executor = new ContinuationActionExecutor(1);
-        ContinuationContext context = new ContinuationContext();
-        AtomicBoolean finished = new AtomicBoolean();
+        Path testClasses =
+                Paths.get(
+                        ContinuationSuspendTest.class
+                                .getProtectionDomain()
+                                .getCodeSource()
+                                .getLocation()
+                                .toURI());
+        Path versionedClasses =
+                testClasses.getParent().resolve("classes").resolve("META-INF/versions/21");
+        Assumptions.assumeTrue(
+                Files.isDirectory(versionedClasses),
+                "JDK 21 continuation classes were not compiled");
+
+        ClassLoader loader =
+                new VersionedRuntimeLoader(
+                        versionedClasses, testClasses, ContinuationSuspendTest.class.getClassLoader());
+        Class<?> driver =
+                loader.loadClass("org.apache.flink.agents.runtime.async.ContinuationSuspendDriver");
         try {
-            long startNanos = System.nanoTime();
-            boolean done =
-                    executor.executeAction(
-                            context,
-                            () -> {
-                                try {
-                                    executor.suspend(context, 2_000L);
-                                } catch (Exception e) {
-                                    throw new RuntimeException(e);
-                                }
-                                finished.set(true);
-                            });
-            long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L;
-
-            assertFalse(done);
-            assertFalse(finished.get());
-            assertTrue(elapsedMs < 500L, "suspend held the caller for " + elapsedMs + " ms");
-
-            long deadlineNanos = System.nanoTime() + 5_000_000_000L;
-            while (!done && System.nanoTime() < deadlineNanos) {
-                Thread.sleep(20L);
-                done = executor.executeAction(context, () -> {});
+            driver.getDeclaredMethod("run").invoke(null);
+        } catch (InvocationTargetException e) {
+            if (e.getCause() instanceof Exception) {
+                throw (Exception) e.getCause();
             }
-            assertTrue(finished.get());
-            assertTrue(done);
-        } finally {
-            executor.close();
+            throw e;
+        }
+    }
+
+    /**
+     * Defines async runtime classes from the multi-release output, and the suspend driver from test
+     * classes, so both see the JDK 21 executor.
+     */
+    private static final class VersionedRuntimeLoader extends ClassLoader {
+        private final Path versionedClasses;
+        private final Path testClasses;
+
+        private VersionedRuntimeLoader(
+                Path versionedClasses, Path testClasses, ClassLoader parent) {
+            super(parent);
+            this.versionedClasses = versionedClasses;
+            this.testClasses = testClasses;
+        }
+
+        @Override
+        protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+            synchronized (getClassLoadingLock(name)) {
+                Class<?> loaded = findLoadedClass(name);
+                if (loaded != null) {
+                    return loaded;
+                }
+                if (name.startsWith("org.apache.flink.agents.runtime.async.")) {
+                    String relative = name.replace('.', '/') + ".class";
+                    Path versioned = versionedClasses.resolve(relative);
+                    Path fallback = testClasses.resolve(relative);
+                    Path bytes = Files.exists(versioned) ? versioned : fallback;
+                    if (Files.exists(bytes)) {
+                        try {
+                            byte[] content = Files.readAllBytes(bytes);
+                            Class<?> defined = defineClass(name, content, 0, content.length);
+                            if (resolve) {
+                                resolveClass(defined);
+                            }
+                            return defined;
+                        } catch (Exception e) {
+                            throw new ClassNotFoundException(name, e);
+                        }
+                    }
+                }
+                return super.loadClass(name, resolve);
+            }
         }
     }
 }
